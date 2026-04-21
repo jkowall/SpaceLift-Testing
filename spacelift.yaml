@@ -1,84 +1,80 @@
-version: "1"
-
 # ---------------------------------------------------------------------------
 # Spacelift Blueprint — Observability Sandbox
 #
-# This blueprint provisions the observability-sandbox stack using OpenTofu.
-# It is designed to run on a Spacelift Private Worker that has access to the
-# local Kubernetes cluster where Jaeger and HotROD will be deployed.
+# Provisions the observability-sandbox stack using OpenTofu on a Spacelift
+# Private Worker that has network access to a local Kubernetes cluster.
+#
+# Blueprint schema reference:
+#   https://docs.spacelift.io/concepts/blueprint
 # ---------------------------------------------------------------------------
 
-blueprint:
-  name: observability-sandbox
+inputs:
+  - id: stack_name
+    name: Stack name
+    type: short_text
+    default: observability-sandbox
+
+  - id: worker_pool_id
+    name: Private Worker Pool ID
+    description: >
+      ID of the Spacelift Private Worker Pool with network access to the
+      local Kubernetes cluster.
+    type: short_text
+
+  - id: kubeconfig_path
+    name: Kubeconfig path on the worker
+    description: >
+      Absolute path to the kubeconfig file inside the worker container.
+    type: short_text
+    default: /root/.kube/config
+
+  - id: vcs_repository
+    name: VCS repository name
+    type: short_text
+    default: SpaceLift-Testing
+
+  - id: vcs_namespace
+    name: VCS namespace (org or user)
+    type: short_text
+
+  - id: vcs_branch
+    name: Tracked branch
+    type: short_text
+    default: main
+
+stack:
+  name: ${{ inputs.stack_name }}
+  space: root
   description: >
-    Deploys a complete observability sandbox (Jaeger + HotROD) on a local
-    Kubernetes cluster using OpenTofu.
+    OpenTofu stack that deploys Jaeger all-in-one and the HotROD demo app
+    into the `observability` namespace of a local Kubernetes cluster.
   labels:
     - observability
     - kubernetes
     - opentofu
 
-  inputs:
-    - id: worker_pool_id
-      name: Private Worker Pool ID
-      description: >
-        The ID of the Spacelift Private Worker Pool that has network access to
-        your local Kubernetes cluster.
-      type: string
+  # Tracked runs do NOT auto-apply; review plans in the UI before confirming.
+  auto_deploy: false
 
-    - id: kubeconfig_path
-      name: Kubeconfig path on the worker
-      description: >
-        Absolute path to the kubeconfig file on the private worker.
-        Defaults to /root/.kube/config inside the runner container.
-      type: string
-      default: /root/.kube/config
+  # Pin to a specific tag/digest in production.
+  runner_image: public.ecr.aws/spacelift/runner-opentofu:latest
 
-  stack:
-    name: observability-sandbox
-    description: >
-      OpenTofu stack that deploys Jaeger all-in-one and the HotROD demo app
-      into the `observability` namespace of a local Kubernetes cluster.
-    space: root
+  worker_pool: ${{ inputs.worker_pool_id }}
 
-    # ── VCS ──────────────────────────────────────────────────────────────────
-    vcs:
-      branch: main
-      project_root: "."
+  vcs:
+    provider: GITHUB
+    namespace: ${{ inputs.vcs_namespace }}
+    repository: ${{ inputs.vcs_repository }}
+    branch: ${{ inputs.vcs_branch }}
+    project_root: "."
 
-    # ── Runner ────────────────────────────────────────────────────────────────
-    # Use the official Spacelift OpenTofu runner image.
-    # NOTE: Pin to a specific digest/tag in production (e.g. runner-opentofu:v1.2.0).
-    runner_image: "public.ecr.aws/spacelift/runner-opentofu:latest"
+  vendor:
+    terraform:
+      version: "1.6.0"
+      workflow_tool: OPEN_TOFU
+      use_smart_sanitization: true
 
-    # ── Vendor (OpenTofu) ────────────────────────────────────────────────────
-    vendor:
-      terraform:
-        version: "~> 1.6"
-        workspace: default
-        use_smart_sanitization: true
-
-    # ── Private Worker Pool ──────────────────────────────────────────────────
-    # The private worker must have kubectl / kubeconfig access to the cluster.
-    worker_pool: ${{ inputs.worker_pool_id }}
-
-    # ── Environment variables ────────────────────────────────────────────────
-    environment:
-      - id: TF_VAR_kubeconfig_path
+  environment:
+    variables:
+      - name: TF_VAR_kubeconfig_path
         value: ${{ inputs.kubeconfig_path }}
-
-    # ── Policies ─────────────────────────────────────────────────────────────
-    policies:
-      - name: auto-approve-plans
-        type: APPROVAL
-        body: |
-          package spacelift
-
-          # Auto-approve all plans so the stack can run unattended on the
-          # private worker. Remove or tighten this rule in production.
-          allow {
-            input.run.type == "PROPOSED"
-          }
-          allow {
-            input.run.type == "TRACKED"
-          }

@@ -50,21 +50,9 @@ resource "kubernetes_deployment" "hotrod" {
           }
 
           # Point HotROD at the Jaeger OTLP HTTP collector.
-          # OTEL_EXPORTER_OTLP_ENDPOINT is the standard OpenTelemetry variable.
-          # JAEGER_AGENT_HOST is kept for backwards compatibility with older images.
           env {
             name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
             value = "http://${local.jaeger_otlp_host}:4318"
-          }
-
-          env {
-            name  = "JAEGER_AGENT_HOST"
-            value = local.jaeger_otlp_host
-          }
-
-          env {
-            name  = "JAEGER_AGENT_PORT"
-            value = "4317"
           }
 
           resources {

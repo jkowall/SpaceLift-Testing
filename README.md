@@ -61,27 +61,34 @@ tofu apply \
 ### 2.1 — Create a Private Worker Pool in Spacelift
 
 1. In the Spacelift UI go to **Settings → Worker Pools → Create Worker Pool**.
-2. Give it a name (e.g. `local-k8s`), then click **Generate**.
-3. Copy the **Worker Pool ID** and the **Private Key** — you will need both.
+2. Give it a name (e.g. `local-k8s`) and upload a CSR (or let Spacelift generate a key pair).
+3. After creation, Spacelift gives you a **Worker Pool config** — this is a base64-encoded
+   blob that the launcher consumes as `SPACELIFT_TOKEN`.
+4. Save the **Worker Pool private key** from step 2 — the launcher reads it as
+   `SPACELIFT_POOL_PRIVATE_KEY` (also base64-encoded).
 
 ### 2.2 — Launch the Spacelift Private Worker on your local machine
 
-Run the official worker container, mounting your kubeconfig so it can reach the cluster:
+Run the official launcher container, mounting your kubeconfig so it can reach the cluster:
 
 ```bash
 docker run --rm -d \
   --name spacelift-worker \
   --network host \
-  -e "SPACELIFT_TOKEN=<YOUR_WORKER_PRIVATE_KEY>" \
-  -e "SPACELIFT_POOL_ID=<YOUR_WORKER_POOL_ID>" \
+  -e "SPACELIFT_TOKEN=<WORKER_POOL_CONFIG_BASE64>" \
+  -e "SPACELIFT_POOL_PRIVATE_KEY=<WORKER_POOL_PRIVATE_KEY_BASE64>" \
   -v "$HOME/.kube:/root/.kube:ro" \
   public.ecr.aws/spacelift/launcher:latest
 ```
 
-> **Note:** `--network host` lets the container reach the Kubernetes API server on
-> `127.0.0.1` / `localhost`. If your cluster API is on a different address, remove
-> `--network host` and ensure the kubeconfig `server:` field uses an IP/hostname
-> reachable from inside the container.
+> **Note on `--network host`:** This only works on **Linux**. On Docker Desktop
+> (macOS/Windows) `--network host` does not share the host's loopback, so a cluster
+> reachable at `127.0.0.1:6443` from your terminal will not be reachable from the
+> container. Options:
+> - Use `host.docker.internal` in the kubeconfig `server:` field (Docker Desktop only), or
+> - Run a `kind` / `k3d` cluster on a user-defined Docker network and attach the worker
+>   to that network with `--network <name>`, or
+> - Use a cluster whose API server is on a LAN IP that's reachable from inside the container.
 
 Verify the worker is connected in **Spacelift UI → Settings → Worker Pools → local-k8s → Workers**.
 
@@ -90,9 +97,16 @@ Verify the worker is connected in **Spacelift UI → Settings → Worker Pools �
 1. In the Spacelift UI go to **Blueprints**, click **Use blueprint**, and select the
    `observability-sandbox` blueprint that Spacelift detected from `spacelift.yaml`.
 2. Fill in the inputs:
+   - **Stack name** — e.g. `observability-sandbox`
    - **Private Worker Pool ID** — the pool ID from step 2.1
    - **Kubeconfig path on the worker** — `/root/.kube/config` (default)
+   - **VCS namespace / repository / branch** — your GitHub org and repo hosting this code
 3. Click **Create stack** → **Trigger run**.
+
+> Tracked runs on `main` require manual confirmation in the UI (`auto_deploy: false`
+> in `spacelift.yaml`). If you want unattended runs in a personal sandbox, flip that
+> field or attach an APPROVAL policy that auto-approves `PROPOSED` runs only —
+> never auto-approve `TRACKED` runs without deliberate scoping.
 
 The stack will run on your local worker and deploy the sandbox into the cluster.
 

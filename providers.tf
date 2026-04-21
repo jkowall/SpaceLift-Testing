@@ -10,12 +10,12 @@ terraform {
 }
 
 provider "kubernetes" {
-  config_path    = var.kubeconfig_path
+  config_path    = pathexpand(var.kubeconfig_path)
   config_context = var.kubeconfig_context
 }
 
 variable "kubeconfig_path" {
-  description = "Path to the kubeconfig file used to authenticate with the cluster."
+  description = "Path to the kubeconfig file used to authenticate with the cluster. Supports ~ expansion."
   type        = string
   default     = "~/.kube/config"
 }
