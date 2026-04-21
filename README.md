@@ -60,12 +60,41 @@ tofu apply \
 
 ### 2.1 — Create a Private Worker Pool in Spacelift
 
-1. In the Spacelift UI go to **Settings → Worker Pools → Create Worker Pool**.
-2. Give it a name (e.g. `local-k8s`) and upload a CSR (or let Spacelift generate a key pair).
-3. After creation, Spacelift gives you a **Worker Pool config** — this is a base64-encoded
-   blob that the launcher consumes as `SPACELIFT_TOKEN`.
-4. Save the **Worker Pool private key** from step 2 — the launcher reads it as
-   `SPACELIFT_POOL_PRIVATE_KEY` (also base64-encoded).
+Spacelift does **not** generate a private key or CSR for you — you generate both locally
+with `openssl`, upload only the CSR, and keep the private key on the machine(s) that
+will run workers.
+
+**Step 1 — Generate a private key and CSR on your machine:**
+
+```bash
+openssl genrsa -out spacelift.key 4096
+openssl req -new -key spacelift.key -out spacelift.csr -subj "/CN=spacelift-worker"
+```
+
+You now have two files in the current directory:
+- `spacelift.key` — private key (keep secret, never upload)
+- `spacelift.csr` — certificate signing request (safe to upload)
+
+**Step 2 — Create the worker pool in the UI:**
+
+1. Go to **Settings → Worker Pools → Create Worker Pool**.
+2. Give it a name (e.g. `local-k8s`).
+3. Paste the **contents of `spacelift.csr`** into the CSR field, then **Create**.
+4. Spacelift returns a **config token** (download the file or copy the text) — this is
+   what the launcher reads as `SPACELIFT_TOKEN`.
+
+**Step 3 — Base64-encode both values for the launcher:**
+
+```bash
+# Config token returned by the UI (save it as spacelift.config first)
+export SPACELIFT_TOKEN=$(base64 -w0 spacelift.config)
+
+# Your private key from Step 1
+export SPACELIFT_POOL_PRIVATE_KEY=$(base64 -w0 spacelift.key)
+```
+
+> On macOS, use `base64 -i spacelift.config | tr -d '\n'` (macOS `base64` doesn't
+> support `-w0`).
 
 ### 2.2 — Launch the Spacelift Private Worker on your local machine
 
@@ -75,8 +104,8 @@ Run the official launcher container, mounting your kubeconfig so it can reach th
 docker run --rm -d \
   --name spacelift-worker \
   --network host \
-  -e "SPACELIFT_TOKEN=<WORKER_POOL_CONFIG_BASE64>" \
-  -e "SPACELIFT_POOL_PRIVATE_KEY=<WORKER_POOL_PRIVATE_KEY_BASE64>" \
+  -e "SPACELIFT_TOKEN=$SPACELIFT_TOKEN" \
+  -e "SPACELIFT_POOL_PRIVATE_KEY=$SPACELIFT_POOL_PRIVATE_KEY" \
   -v "$HOME/.kube:/root/.kube:ro" \
   public.ecr.aws/spacelift/launcher:latest
 ```
