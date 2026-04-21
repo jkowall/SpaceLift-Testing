@@ -139,12 +139,36 @@ kubectl config view --minify --raw --context=kind-kind-cluster | `
 
 ### 2.5 — Launch the Private Worker on Podman
 
-The worker needs network access to the kind API server. Because kind on Podman publishes the API to the Podman VM's loopback (`127.0.0.1:<port>`), running the worker with `--network host` on Podman makes the same port reachable inside the worker container.
+The worker needs two things:
+
+1. **Network access to the kind API server.** kind publishes the cluster API to the Podman VM's loopback (`127.0.0.1:<port>`), so running the worker with `--network host` makes that port reachable inside the container.
+2. **A Docker-compatible socket** so the launcher can spawn run containers. Spacelift's launcher was written for Docker; Podman exposes a compatible API socket that works as a drop-in replacement once mounted at `/var/run/docker.sock`.
+
+First, find Podman's socket path (usually `/run/user/1000/podman/podman.sock` rootless or `/run/podman/podman.sock` rootful):
 
 ```powershell
-# Base64-encode both credential files (GNU base64 inside a container — works regardless of host OS)
-$SPACELIFT_TOKEN = podman run --rm -v ${PWD}:/w -w /w alpine base64 -w0 spacelift.config
+podman info --format '{{.Host.RemoteSocket.Path}}'
+
+# If it says "not active", enable it:
+podman machine ssh 'systemctl --user enable --now podman.socket'
+```
+
+```powershell
+# SPACELIFT_TOKEN: the .config file is ALREADY base64-encoded — pass its contents as-is.
+# Double-encoding it causes "could not unmarshal iot config" at launcher startup.
+$SPACELIFT_TOKEN = (Get-Content spacelift.config -Raw).Trim()
+
+# SPACELIFT_POOL_PRIVATE_KEY: still a raw PEM, so it DOES need base64 encoding.
+# Use GNU base64 inside an Alpine container to avoid host-OS flag differences.
 $SPACELIFT_POOL_PRIVATE_KEY = podman run --rm -v ${PWD}:/w -w /w alpine base64 -w0 spacelift.key
+
+# Sanity check: token should start with base64 for {"broker":... (i.e. "eyJicm9rZXIi...")
+Write-Host "TOKEN head: $($SPACELIFT_TOKEN.Substring(0, 20))"
+
+podman rm -f spacelift-worker 2>$null
+
+# Replace PODMAN_SOCK with the path from `podman info` above
+$PODMAN_SOCK = "/run/user/1000/podman/podman.sock"
 
 podman run --rm -d `
   --name spacelift-worker `
@@ -152,11 +176,16 @@ podman run --rm -d `
   -e SPACELIFT_TOKEN="$SPACELIFT_TOKEN" `
   -e SPACELIFT_POOL_PRIVATE_KEY="$SPACELIFT_POOL_PRIVATE_KEY" `
   -v "$env:USERPROFILE\.kube-spacelift:/root/.kube:ro" `
+  -v "${PODMAN_SOCK}:/var/run/docker.sock" `
   public.ecr.aws/spacelift/launcher:latest
 
-# Confirm it started
+# Confirm it started (drop -f once you've seen it connect)
 podman logs -f spacelift-worker
 ```
+
+> **Common errors and fixes:**
+> - `could not unmarshal iot config` — token got base64-encoded twice. Re-run the `Get-Content` line above (don't pipe `spacelift.config` through `base64`).
+> - `couldn't ping docker daemon ... /var/run/docker.sock` — Podman's socket isn't mounted or isn't running. Check `podman info --format '{{.Host.RemoteSocket.Path}}'` and confirm the `-v <sock>:/var/run/docker.sock` mount path matches. Enable the socket with `podman machine ssh 'systemctl --user enable --now podman.socket'` if needed.
 
 Verify the worker shows up in **Spacelift UI → Settings → Worker Pools → local-k8s → Workers** as `Online`.
 
