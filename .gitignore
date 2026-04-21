@@ -1,0 +1,29 @@
+# Spacelift worker credentials — NEVER commit these
+*.key
+*.csr
+*.pem
+spacelift.config
+spacelift-credentials/
+credentials/
+
+# OpenTofu / Terraform local state and overrides
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / tooling
+.vscode/
+.idea/
+.claude/

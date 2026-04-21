@@ -25,88 +25,161 @@ The sandbox consists of:
 
 | Requirement | Details |
 |---|---|
-| Local Kubernetes cluster | kind, k3d, minikube, Docker Desktop, or any kubeadm cluster |
+| Local Kubernetes cluster | `kind` on Podman is the walkthrough path below; k3d, minikube, or Docker Desktop also work |
 | OpenTofu ≥ 1.6 | `brew install opentofu` or see https://opentofu.org/docs/intro/install |
 | kubectl | Configured with a valid context for the cluster |
-| Docker | Required to run the Spacelift Private Worker |
-| Spacelift account | Free tier works; you need a **Private Worker Pool** token |
+| Container runtime | Podman (walkthrough) or Docker — used to run the Spacelift Private Worker |
+| openssl | Ships with Git for Windows (`C:\Program Files\Git\usr\bin\openssl.exe`), WSL, or any Linux/macOS host |
+| Spacelift account | Free tier works; you need a **Private Worker Pool** |
+
+> **Windows users:** the walkthrough assumes Podman Desktop with WSL2 backend and PowerShell. Paths and base64 flags differ on macOS/Linux — notes inline where they do.
+
+---
+
+## Credentials & files — what lives where
+
+This workflow produces several credential files. **None of them should be committed.** A `.gitignore` in the repo root excludes `*.key`, `*.csr`, `*.pem`, `spacelift.config`, and a `credentials/` subdirectory. Either:
+
+- Keep them in the repo root (gitignore catches them), or
+- Put them in a `credentials/` subdir for tidiness (also gitignored):
+
+```powershell
+mkdir credentials -ErrorAction SilentlyContinue
+cd credentials
+# …run the openssl + base64 commands from here
+```
 
 ---
 
 ## 1 — Local Deployment (without Spacelift)
 
 ```bash
-# Initialise providers
 tofu init
-
-# Preview the changes
 tofu plan
-
-# Apply
 tofu apply
 ```
 
-To target a specific cluster context:
+Target a specific kubeconfig context:
 
 ```bash
 tofu apply \
   -var="kubeconfig_path=$HOME/.kube/config" \
-  -var="kubeconfig_context=docker-desktop"
+  -var="kubeconfig_context=kind-kind-cluster"
 ```
 
 ---
 
-## 2 — Spacelift Deployment (via Private Worker)
+## 2 — Spacelift Deployment (via Private Worker on Podman + kind)
 
-### 2.1 — Create a Private Worker Pool in Spacelift
+### 2.1 — Create a kind cluster on Podman
 
-1. In the Spacelift UI go to **Settings → Worker Pools → Create Worker Pool**.
-2. Give it a name (e.g. `local-k8s`) and upload a CSR (or let Spacelift generate a key pair).
-3. After creation, Spacelift gives you a **Worker Pool config** — this is a base64-encoded
-   blob that the launcher consumes as `SPACELIFT_TOKEN`.
-4. Save the **Worker Pool private key** from step 2 — the launcher reads it as
-   `SPACELIFT_POOL_PRIVATE_KEY` (also base64-encoded).
+```powershell
+# Start the Podman VM (once per reboot)
+podman machine start
 
-### 2.2 — Launch the Spacelift Private Worker on your local machine
+# Tell kind to use Podman, then create a cluster
+$env:KIND_EXPERIMENTAL_PROVIDER = "podman"
+kind create cluster --name kind-cluster
 
-Run the official launcher container, mounting your kubeconfig so it can reach the cluster:
-
-```bash
-docker run --rm -d \
-  --name spacelift-worker \
-  --network host \
-  -e "SPACELIFT_TOKEN=<WORKER_POOL_CONFIG_BASE64>" \
-  -e "SPACELIFT_POOL_PRIVATE_KEY=<WORKER_POOL_PRIVATE_KEY_BASE64>" \
-  -v "$HOME/.kube:/root/.kube:ro" \
-  public.ecr.aws/spacelift/launcher:latest
+# Verify
+kubectl config get-contexts       # * should be on kind-kind-cluster
+kubectl get nodes                 # one node, Ready
 ```
 
-> **Note on `--network host`:** This only works on **Linux**. On Docker Desktop
-> (macOS/Windows) `--network host` does not share the host's loopback, so a cluster
-> reachable at `127.0.0.1:6443` from your terminal will not be reachable from the
-> container. Options:
-> - Use `host.docker.internal` in the kubeconfig `server:` field (Docker Desktop only), or
-> - Run a `kind` / `k3d` cluster on a user-defined Docker network and attach the worker
->   to that network with `--network <name>`, or
-> - Use a cluster whose API server is on a LAN IP that's reachable from inside the container.
+kind writes a context named `kind-kind-cluster` into `~/.kube/config` with `server: https://127.0.0.1:<random-port>`. That port is published from the kind container into the Podman VM's loopback.
 
-Verify the worker is connected in **Spacelift UI → Settings → Worker Pools → local-k8s → Workers**.
+### 2.2 — Generate a private key and CSR for the worker
 
-### 2.3 — Create the stack from the blueprint
+Spacelift does **not** generate keys for you. You generate the private key locally, upload only the CSR, and Spacelift signs it.
 
-1. In the Spacelift UI go to **Blueprints**, click **Use blueprint**, and select the
-   `observability-sandbox` blueprint that Spacelift detected from `spacelift.yaml`.
+Using the openssl that ships with Git for Windows:
+
+```powershell
+# Run from the repo root (or from a credentials/ subdir — both are gitignored)
+$openssl = "C:\Program Files\Git\usr\bin\openssl.exe"
+& $openssl genrsa -out spacelift.key 4096
+& $openssl req -new -key spacelift.key -out spacelift.csr -subj "/CN=spacelift-worker"
+```
+
+Alternative — ephemeral Podman container (no host openssl needed):
+
+```powershell
+podman run --rm -v ${PWD}:/work -w /work alpine/openssl genrsa -out spacelift.key 4096
+podman run --rm -v ${PWD}:/work -w /work alpine/openssl req -new -key spacelift.key -out spacelift.csr -subj "/CN=spacelift-worker"
+```
+
+You now have:
+- `spacelift.key` — **private key**, never upload or commit
+- `spacelift.csr` — certificate signing request, safe to upload
+
+### 2.3 — Create the Worker Pool in Spacelift
+
+1. In the Spacelift UI: **Settings → Worker Pools → Create Worker Pool**.
+2. Name it (e.g. `local-k8s`).
+3. **Upload `spacelift.csr`** using the file picker. The UI does not accept pasted text.
+4. Click **Create**. Spacelift signs the CSR and downloads a `<pool-name>.config` file — this is the base64-encoded config blob consumed by the launcher as `SPACELIFT_TOKEN`.
+5. Note the **Worker Pool ID** from the pool's detail page — you'll need it when creating the stack.
+
+Save the `.config` file next to your key (or in `credentials/`). Rename to `spacelift.config` for convenience if you like:
+
+```powershell
+# If it downloaded to Downloads as e.g. local-k8s.config
+Move-Item $env:USERPROFILE\Downloads\local-k8s.config .\spacelift.config
+```
+
+### 2.4 — Prepare a dedicated kubeconfig for the worker
+
+Don't mount your entire `~/.kube/config` — it may contain unrelated contexts. Export a minified copy with just the kind context:
+
+```powershell
+mkdir $env:USERPROFILE\.kube-spacelift -ErrorAction SilentlyContinue
+kubectl config view --minify --raw --context=kind-kind-cluster | `
+  Out-File -Encoding ascii $env:USERPROFILE\.kube-spacelift\config
+```
+
+### 2.5 — Launch the Private Worker on Podman
+
+The worker needs network access to the kind API server. Because kind on Podman publishes the API to the Podman VM's loopback (`127.0.0.1:<port>`), running the worker with `--network host` on Podman makes the same port reachable inside the worker container.
+
+```powershell
+# Base64-encode both credential files (GNU base64 inside a container — works regardless of host OS)
+$SPACELIFT_TOKEN = podman run --rm -v ${PWD}:/w -w /w alpine base64 -w0 spacelift.config
+$SPACELIFT_POOL_PRIVATE_KEY = podman run --rm -v ${PWD}:/w -w /w alpine base64 -w0 spacelift.key
+
+podman run --rm -d `
+  --name spacelift-worker `
+  --network host `
+  -e SPACELIFT_TOKEN="$SPACELIFT_TOKEN" `
+  -e SPACELIFT_POOL_PRIVATE_KEY="$SPACELIFT_POOL_PRIVATE_KEY" `
+  -v "$env:USERPROFILE\.kube-spacelift:/root/.kube:ro" `
+  public.ecr.aws/spacelift/launcher:latest
+
+# Confirm it started
+podman logs -f spacelift-worker
+```
+
+Verify the worker shows up in **Spacelift UI → Settings → Worker Pools → local-k8s → Workers** as `Online`.
+
+> **Alternative networking (if `--network host` gives trouble):** attach the worker to kind's Podman network and edit the kubeconfig's `server:` field to point at `kind-cluster-control-plane:6443`:
+>
+> ```powershell
+> podman network ls                                   # confirm 'kind' network exists
+> # then add: --network kind   to the podman run above
+> # and edit $env:USERPROFILE\.kube-spacelift\config to set:
+> #   server: https://kind-cluster-control-plane:6443
+> ```
+
+### 2.6 — Create the stack from the blueprint
+
+1. In the Spacelift UI, go to **Blueprints**, click **Use blueprint**, and select the `observability-sandbox` blueprint that Spacelift detected from `spacelift.yaml`.
 2. Fill in the inputs:
    - **Stack name** — e.g. `observability-sandbox`
-   - **Private Worker Pool ID** — the pool ID from step 2.1
+   - **Private Worker Pool ID** — from step 2.3
    - **Kubeconfig path on the worker** — `/root/.kube/config` (default)
    - **VCS namespace / repository / branch** — your GitHub org and repo hosting this code
 3. Click **Create stack** → **Trigger run**.
 
-> Tracked runs on `main` require manual confirmation in the UI (`auto_deploy: false`
-> in `spacelift.yaml`). If you want unattended runs in a personal sandbox, flip that
-> field or attach an APPROVAL policy that auto-approves `PROPOSED` runs only —
-> never auto-approve `TRACKED` runs without deliberate scoping.
+> Tracked runs on `main` require manual confirmation in the UI (`auto_deploy: false` in `spacelift.yaml`). If you want unattended runs in a personal sandbox, flip that field or attach an APPROVAL policy that auto-approves `PROPOSED` runs only — never auto-approve `TRACKED` runs without deliberate scoping.
 
 The stack will run on your local worker and deploy the sandbox into the cluster.
 
