@@ -1,0 +1,80 @@
+# ---------------------------------------------------------------------------
+# Spacelift Blueprint — Observability Sandbox
+#
+# Provisions the observability-sandbox stack using OpenTofu on a Spacelift
+# Private Worker that has network access to a local Kubernetes cluster.
+#
+# Blueprint schema reference:
+#   https://docs.spacelift.io/concepts/blueprint
+# ---------------------------------------------------------------------------
+
+inputs:
+  - id: stack_name
+    name: Stack name
+    type: short_text
+    default: observability-sandbox
+
+  - id: worker_pool_id
+    name: Private Worker Pool ID
+    description: >
+      ID of the Spacelift Private Worker Pool with network access to the
+      local Kubernetes cluster.
+    type: short_text
+
+  - id: kubeconfig_path
+    name: Kubeconfig path on the worker
+    description: >
+      Absolute path to the kubeconfig file inside the worker container.
+    type: short_text
+    default: /root/.kube/config
+
+  - id: vcs_repository
+    name: VCS repository name
+    type: short_text
+    default: SpaceLift-Testing
+
+  - id: vcs_namespace
+    name: VCS namespace (org or user)
+    type: short_text
+
+  - id: vcs_branch
+    name: Tracked branch
+    type: short_text
+    default: main
+
+stack:
+  name: ${{ inputs.stack_name }}
+  space: root
+  description: >
+    OpenTofu stack that deploys Jaeger all-in-one and the HotROD demo app
+    into the `observability` namespace of a local Kubernetes cluster.
+  labels:
+    - observability
+    - kubernetes
+    - opentofu
+
+  # Tracked runs do NOT auto-apply; review plans in the UI before confirming.
+  auto_deploy: false
+
+  # Pin to a specific tag/digest in production.
+  runner_image: public.ecr.aws/spacelift/runner-opentofu:latest
+
+  worker_pool: ${{ inputs.worker_pool_id }}
+
+  vcs:
+    provider: GITHUB
+    namespace: ${{ inputs.vcs_namespace }}
+    repository: ${{ inputs.vcs_repository }}
+    branch: ${{ inputs.vcs_branch }}
+    project_root: "."
+
+  vendor:
+    terraform:
+      version: "1.6.0"
+      workflow_tool: OPEN_TOFU
+      use_smart_sanitization: true
+
+  environment:
+    variables:
+      - name: TF_VAR_kubeconfig_path
+        value: ${{ inputs.kubeconfig_path }}
