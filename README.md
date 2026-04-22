@@ -71,6 +71,54 @@ tofu apply \
 
 ## 2 — Spacelift Deployment (via Private Worker on Podman + kind)
 
+### Portable Podman setup
+
+For portability across Windows and macOS, avoid kubeconfigs that point at a
+host-local API URL like `https://127.0.0.1:<port>` or at a hard-coded Podman
+container IP. Instead:
+
+1. Put the Spacelift launcher and run containers on kind's Podman network.
+2. Use kind's stable control-plane container name as the Kubernetes API host:
+   `https://kind-cluster-control-plane:6443`.
+3. Upload the generated kubeconfig as a Spacelift mounted file at `kube/config`.
+4. Set `TF_VAR_kubeconfig_path=/mnt/workspace/kube/config` on the stack.
+
+Windows PowerShell:
+
+```powershell
+.\scripts\prepare-spacelift-kubeconfig.ps1
+.\scripts\start-spacelift-worker.ps1
+```
+
+macOS/Linux shell with Podman:
+
+```bash
+./scripts/prepare-spacelift-kubeconfig.sh
+./scripts/start-spacelift-worker.sh
+```
+
+Both scripts assume the README defaults:
+
+| Setting | Default |
+|---|---|
+| kind cluster name | `kind-cluster` |
+| kubeconfig context | `kind-kind-cluster` |
+| Podman network | `kind` |
+| Spacelift mounted file path | `kube/config` |
+| Terraform variable | `TF_VAR_kubeconfig_path=/mnt/workspace/kube/config` |
+
+If you use another kind cluster name, pass the context and cluster name:
+
+```powershell
+.\scripts\prepare-spacelift-kubeconfig.ps1 `
+  -Context kind-my-cluster `
+  -ClusterName my-cluster
+```
+
+```bash
+./scripts/prepare-spacelift-kubeconfig.sh kind-my-cluster my-cluster
+```
+
 ### 2.1 — Create a kind cluster on Podman
 
 ```powershell
@@ -129,19 +177,28 @@ Move-Item $env:USERPROFILE\Downloads\local-k8s.config .\spacelift.config
 
 ### 2.4 — Prepare a dedicated kubeconfig for the worker
 
-Don't mount your entire `~/.kube/config` — it may contain unrelated contexts. Export a minified copy with just the kind context:
+Don't mount your entire `~/.kube/config` — it may contain unrelated contexts.
+Generate a minified copy with just the kind context and a container-reachable
+API server name:
 
 ```powershell
-mkdir $env:USERPROFILE\.kube-spacelift -ErrorAction SilentlyContinue
-kubectl config view --minify --raw --context=kind-kind-cluster | `
-  Out-File -Encoding ascii $env:USERPROFILE\.kube-spacelift\config
+.\scripts\prepare-spacelift-kubeconfig.ps1
 ```
+
+On macOS/Linux with Podman:
+
+```bash
+./scripts/prepare-spacelift-kubeconfig.sh
+```
+
+Upload the generated kubeconfig to the Spacelift stack as a secret mounted file
+at `kube/config`, and set `TF_VAR_kubeconfig_path=/mnt/workspace/kube/config`.
 
 ### 2.5 — Launch the Private Worker on Podman
 
 The worker needs two things:
 
-1. **Network access to the kind API server.** kind publishes the cluster API to the Podman VM's loopback (`127.0.0.1:<port>`), so running the worker with `--network host` makes that port reachable inside the container.
+1. **Network access to the kind API server.** Run the launcher and spawned run containers on kind's Podman network, where `kind-cluster-control-plane:6443` is reachable.
 2. **A Docker-compatible socket** so the launcher can spawn run containers. Spacelift's launcher was written for Docker; Podman exposes a compatible API socket that works as a drop-in replacement once mounted at `/var/run/docker.sock`.
 
 First, find Podman's socket path (usually `/run/user/1000/podman/podman.sock` rootless or `/run/podman/podman.sock` rootful):
@@ -153,34 +210,16 @@ podman info --format '{{.Host.RemoteSocket.Path}}'
 podman machine ssh 'systemctl --user enable --now podman.socket'
 ```
 
+Start the worker:
+
 ```powershell
-# SPACELIFT_TOKEN: the .config file is ALREADY base64-encoded — pass its contents as-is.
-# Double-encoding it causes "could not unmarshal iot config" at launcher startup.
-$SPACELIFT_TOKEN = (Get-Content spacelift.config -Raw).Trim()
+.\scripts\start-spacelift-worker.ps1
+```
 
-# SPACELIFT_POOL_PRIVATE_KEY: still a raw PEM, so it DOES need base64 encoding.
-# Use GNU base64 inside an Alpine container to avoid host-OS flag differences.
-$SPACELIFT_POOL_PRIVATE_KEY = podman run --rm -v ${PWD}:/w -w /w alpine base64 -w0 spacelift.key
+On macOS/Linux with Podman:
 
-# Sanity check: token should start with base64 for {"broker":... (i.e. "eyJicm9rZXIi...")
-Write-Host "TOKEN head: $($SPACELIFT_TOKEN.Substring(0, 20))"
-
-podman rm -f spacelift-worker 2>$null
-
-# Replace PODMAN_SOCK with the path from `podman info` above
-$PODMAN_SOCK = "/run/user/1000/podman/podman.sock"
-
-podman run --rm -d `
-  --name spacelift-worker `
-  --network host `
-  -e SPACELIFT_TOKEN="$SPACELIFT_TOKEN" `
-  -e SPACELIFT_POOL_PRIVATE_KEY="$SPACELIFT_POOL_PRIVATE_KEY" `
-  -v "$env:USERPROFILE\.kube-spacelift:/root/.kube:ro" `
-  -v "${PODMAN_SOCK}:/var/run/docker.sock" `
-  public.ecr.aws/spacelift/launcher:latest
-
-# Confirm it started (drop -f once you've seen it connect)
-podman logs -f spacelift-worker
+```bash
+./scripts/start-spacelift-worker.sh
 ```
 
 > **Common errors and fixes:**
@@ -188,15 +227,6 @@ podman logs -f spacelift-worker
 > - `couldn't ping docker daemon ... /var/run/docker.sock` — Podman's socket isn't mounted or isn't running. Check `podman info --format '{{.Host.RemoteSocket.Path}}'` and confirm the `-v <sock>:/var/run/docker.sock` mount path matches. Enable the socket with `podman machine ssh 'systemctl --user enable --now podman.socket'` if needed.
 
 Verify the worker shows up in **Spacelift UI → Settings → Worker Pools → local-k8s → Workers** as `Online`.
-
-> **Alternative networking (if `--network host` gives trouble):** attach the worker to kind's Podman network and edit the kubeconfig's `server:` field to point at `kind-cluster-control-plane:6443`:
->
-> ```powershell
-> podman network ls                                   # confirm 'kind' network exists
-> # then add: --network kind   to the podman run above
-> # and edit $env:USERPROFILE\.kube-spacelift\config to set:
-> #   server: https://kind-cluster-control-plane:6443
-> ```
 
 ### 2.6 — Create the stack from the blueprint
 
@@ -217,32 +247,39 @@ The stack will run on your local worker and deploy the sandbox into the cluster.
 ## 3 — Accessing the UIs
 
 After deployment (`tofu apply` or the Spacelift run completes), the services are
-exposed as **NodePort** services.
+created in the cluster and Terraform prints local access commands as outputs.
+For kind on Podman, use `kubectl port-forward`; kind does not automatically
+publish Kubernetes NodePorts to your Windows or macOS host.
+
+Start both HotROD and Jaeger port-forwards:
+
+```powershell
+.\scripts\open-observability.ps1
+```
+
+On macOS/Linux:
+
+```bash
+./scripts/open-observability.sh
+```
 
 ### Jaeger UI
 
 ```
-http://<NODE_IP>:30686
-```
-
-For single-node clusters (kind, minikube, Docker Desktop) `<NODE_IP>` is typically
-`localhost` or `127.0.0.1`:
-
-```
-http://localhost:30686
+http://localhost:16686
 ```
 
 ### HotROD UI
 
 ```
-http://localhost:30808
+http://localhost:8080
 ```
 
 ---
 
 ## 4 — Generating Traces with HotROD
 
-1. Open **http://localhost:30808** in a browser.
+1. Open **http://localhost:8080** in a browser.
 2. You will see four coloured buttons, one per simulated customer:
    - **Rachel's Floral Designs**
    - **Rachel's Floral Designs (Fancy)**
@@ -250,7 +287,7 @@ http://localhost:30808
    - **Amazing Coffee Roasters (Uber)**
 3. Click any button to dispatch a car. Each click triggers a chain of HTTP and
    gRPC calls across several micro-services, all instrumented with OpenTelemetry.
-4. Switch to the **Jaeger UI** at **http://localhost:30686**, select the
+4. Switch to the **Jaeger UI** at **http://localhost:16686**, select the
    `frontend` service from the *Service* dropdown, and click **Find Traces** to
    see the generated spans.
 
@@ -271,12 +308,12 @@ ClusterIP) and/or from your local machine (via NodePort):
 HotROD uses `jaeger-otlp.observability.svc.cluster.local:4318` (OTLP/HTTP) to
 send traces to Jaeger.
 
-### Host → cluster (NodePort)
+### Host → cluster access
 
-| NodePort | Target Port | Service | Purpose |
-|----------|-------------|---------|---------|
-| **30686** | 16686 | `jaeger-ui` (NodePort) | Jaeger web UI |
-| **30808** | 8080 | `hotrod` (NodePort) | HotROD web UI / dispatch buttons |
+| Local URL | Command | Purpose |
+|-----------|---------|---------|
+| `http://localhost:16686` | `kubectl -n observability port-forward svc/jaeger-ui 16686:16686` | Jaeger web UI |
+| `http://localhost:8080` | `kubectl -n observability port-forward svc/hotrod 8080:8080` | HotROD web UI / dispatch buttons |
 
 ### Kubernetes API (Spacelift worker → cluster)
 
@@ -284,8 +321,9 @@ send traces to Jaeger.
 |------|---------|
 | 6443 (or 443) | kubectl / provider authentication |
 
-> Ensure your local firewall or security group rules allow Docker to reach these
-> NodePort ranges (`30000–32767`) on the host network interface.
+The services still use NodePort internally, but the documented local access path
+is port-forwarding because it works consistently across Podman on Windows and
+macOS.
 
 ---
 
