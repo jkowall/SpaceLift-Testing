@@ -5,6 +5,8 @@
 spacelift.config
 spacelift-credentials/
 credentials/
+contexts/
+local.spacelift-worker.psd1
 
 # OpenTofu / Terraform local state and overrides
 .terraform/

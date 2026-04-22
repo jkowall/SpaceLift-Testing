@@ -97,6 +97,22 @@ macOS/Linux shell with Podman:
 ./scripts/start-spacelift-worker.sh
 ```
 
+To make this repeatable on the same machine, copy the local worker example config
+and keep it next to your ignored credentials:
+
+```powershell
+Copy-Item .\local.spacelift-worker.example.psd1 .\local.spacelift-worker.psd1
+```
+
+Then restore the kubeconfig and worker with one command:
+
+```powershell
+.\scripts\restore-spacelift-worker.ps1
+```
+
+`local.spacelift-worker.psd1` is gitignored because it can point at local secret
+files and machine-specific paths.
+
 Both scripts assume the README defaults:
 
 | Setting | Default |
